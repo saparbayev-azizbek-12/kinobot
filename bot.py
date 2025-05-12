@@ -67,7 +67,7 @@ async def start_cmd(message: types.Message):
         )
         return
 
-    await message.answer("🎬 Qaysi film kerak? Raqam yuboring (masalan: 12)")
+    await message.answer("🎬 Qaysi film kerak? Raqam yuboring")
 
 @dp.callback_query(F.data == "check_subs")
 async def check_callback(callback: types.CallbackQuery):
