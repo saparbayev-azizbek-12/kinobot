@@ -156,7 +156,7 @@ async def send_video(message: types.Message):
 # Admin commands
 @dp.message(Command("homiy_qosh"))
 async def add_sponsor(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
+    if message.from_user.id not in ADMIN_ID:
         return
     
     text = message.text.split()
@@ -175,7 +175,7 @@ async def add_sponsor(message: types.Message):
 
 @dp.message(Command("homiy_olib_tashla"))
 async def remove_sponsor(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
+    if message.from_user.id not in ADMIN_ID:
         return
     
     text = message.text.split()
@@ -194,7 +194,7 @@ async def remove_sponsor(message: types.Message):
 
 @dp.message(Command("homiylar"))
 async def list_sponsors(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
+    if message.from_user.id not in ADMIN_ID:
         return
     
     sponsors = load_sponsors()
@@ -205,7 +205,7 @@ async def list_sponsors(message: types.Message):
 
 @dp.message(Command("xabar_yubor"))
 async def broadcast(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
+    if message.from_user.id not in ADMIN_ID:
         return
     
     text = message.text.replace("/xabar_yubor", "").strip()
