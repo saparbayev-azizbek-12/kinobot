@@ -78,6 +78,22 @@ async def check_callback(callback: types.CallbackQuery):
     else:
         await callback.answer("🚫 Obuna hali to'liq emas!", show_alert=True)
 
+@dp.message(Command("stat"))
+async def show_stats(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    users = load_users()
+    total_users = len(users)
+
+    text = f"📊 Foydalanuvchilar statistikasi:\n\n"
+    text += f"👥 Umumiy foydalanuvchilar soni: <b>{total_users}</b>\n"
+
+    # Agar siz foydalanuvchilar ro'yxatini ham ko'rsatmoqchi bo'lsangiz:
+    # text += "\n🧾 Foydalanuvchilar ID ro'yxati:\n"
+    # text += "\n".join(str(uid) for uid in users)
+
+    await message.reply(text)
 
 @dp.message(F.content_type == "video")
 async def save_video(message: types.Message):
