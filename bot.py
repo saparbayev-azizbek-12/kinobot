@@ -75,7 +75,7 @@ async def start_cmd(message: types.Message):
         )
         return
 
-    await message.answer("🎬 Qaysi film kerak? Raqam yuboring (masalan: 12)")
+    await message.answer("🎬 Qaysi film kerak? Raqam yuboring")
 
 @dp.message(Command("help"))
 async def help_cmd(message: types.Message):
@@ -96,10 +96,17 @@ async def check_callback(callback: types.CallbackQuery):
 
 @dp.message(Command("stat"))
 async def show_stats(message: types.Message):
+<<<<<<< HEAD
     if message.from_user.id not in ADMIN_ID:
         return
 
     users = get_all_users()
+=======
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    users = load_users()
+>>>>>>> 94bd044a48746cbc3c26df53a283a5eaa8aa2a7a
     total_users = len(users)
 
     text = f"📊 Foydalanuvchilar statistikasi:\n\n"
