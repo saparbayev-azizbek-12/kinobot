@@ -1,18 +1,32 @@
 import asyncio
-import json
 import logging
-import os
-from typing import List
 
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiohttp import web
 from aiogram.enums import ParseMode
+from aiogram.filters import Command
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.types import BotCommandScopeDefault, BotCommandScopeChat
+from aiogram.types import InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.filters import StateFilter
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
-from config import API_TOKEN, ADMIN_ID, MEDIA_CHANNEL_ID
-from utils import load_sponsors, load_users, save_user, check_subscriptions, save_sponsors
+from config import API_TOKEN, ADMIN_ID, MEDIA_CHANNEL_ID, WEBHOOK_HOST, WEBHOOK_PATH, WEBHOOK_URL
+from bot_commands import user_commands, admin_commands
+from database import (
+    initialize_database,
+    add_user,
+    get_all_users,
+    add_sponsor,
+    remove_sponsor,
+    get_all_sponsors,
+    add_video,
+    get_video_message_id,
+    check_subscriptions
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -24,28 +38,22 @@ bot = Bot(
 )
 dp = Dispatcher()
 
-# Constants
-DATA_FILE = "videos.json"
-if not os.path.exists(DATA_FILE):
-    with open(DATA_FILE, "w") as f:
-        json.dump({}, f)
+# States for FSM
+class BroadcastState(StatesGroup):
+    waiting_for_message = State()
 
-def load_data() -> dict:
-    with open(DATA_FILE, "r") as f:
-        return json.load(f)
-
-def save_data(data: dict) -> None:
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+class SponsorState(StatesGroup):
+    adding = State()
+    removing = State()
 
 # Command handlers
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     user_id = message.from_user.id
-    save_user(user_id)
+    add_user(user_id)
 
     if not await check_subscriptions(bot, user_id):
-        sponsors = load_sponsors()
+        sponsors = get_all_sponsors()
         builder = InlineKeyboardBuilder()
 
         for ch in sponsors:
@@ -69,6 +77,14 @@ async def start_cmd(message: types.Message):
 
     await message.answer("🎬 Qaysi film kerak? Raqam yuboring (masalan: 12)")
 
+@dp.message(Command("help"))
+async def help_cmd(message: types.Message):
+    text = "ℹ️ **Mavjud buyruqlar:**\n\n"
+    commands = admin_commands if message.from_user.id in ADMIN_ID else user_commands
+    for cmd in commands:
+        text += f"/{cmd.command} - {cmd.description}\n"
+    await message.answer(text)
+
 @dp.callback_query(F.data == "check_subs")
 async def check_callback(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -80,10 +96,10 @@ async def check_callback(callback: types.CallbackQuery):
 
 @dp.message(Command("stat"))
 async def show_stats(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
+    if message.from_user.id not in ADMIN_ID:
         return
 
-    users = load_users()
+    users = get_all_users()
     total_users = len(users)
 
     text = f"📊 Foydalanuvchilar statistikasi:\n\n"
@@ -97,20 +113,13 @@ async def show_stats(message: types.Message):
 
 @dp.message(F.content_type == "video")
 async def save_video(message: types.Message):
-    print(message)
-    print(message.forward_from_chat)
-    print(message.forward_from_message_id)
     if message.forward_from_chat and message.forward_from_message_id:
-        print("Chat ID:", message.forward_from_chat.id)
-        print("Caption:", message.caption)
         if message.forward_from_chat.id == MEDIA_CHANNEL_ID:
             caption = message.caption or ""
             numbers = [word for word in caption.split() if word.isdigit()]
             if numbers:
                 number = numbers[0]
-                data = load_data()
-                data[number] = message.forward_from_message_id
-                save_data(data)
+                add_video(number, message.forward_from_message_id)
                 await message.reply(f"✅ {number}-raqamli video saqlandi.")
             else:
                 await message.reply("⚠️ Izohda raqam topilmadi.")
@@ -126,7 +135,7 @@ async def send_video(message: types.Message):
     user_id = message.from_user.id
 
     if not await check_subscriptions(bot, user_id):
-        sponsors = load_sponsors()
+        sponsors = get_all_sponsors()
         builder = InlineKeyboardBuilder()
 
         for ch in sponsors:
@@ -148,10 +157,10 @@ async def send_video(message: types.Message):
         )
         return
 
-    msg_id = message.text.strip()
-    data = load_data()
+    video_code = message.text.strip()
+    message_id = get_video_message_id(video_code)
 
-    if msg_id not in data:
+    if not message_id:
         await message.reply("❌ Bu raqamga mos film topilmadi.")
         return
 
@@ -159,7 +168,7 @@ async def send_video(message: types.Message):
         post = await bot.copy_message(
             chat_id=message.chat.id,
             from_chat_id=MEDIA_CHANNEL_ID,
-            message_id=data[msg_id]
+            message_id=message_id
         )
         await bot.edit_message_caption(
             chat_id=message.chat.id,
@@ -171,65 +180,89 @@ async def send_video(message: types.Message):
 
 # Admin commands
 @dp.message(Command("homiy_qosh"))
-async def add_sponsor(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
+async def add_sponsor_command_handler(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_ID:
         return
-    
-    text = message.text.split()
-    if len(text) < 2:
-        await message.reply("❗ Foydalanish: /homiy_qosh @kanal_username")
-        return
-    
-    sponsor = text[1]
-    sponsors = load_sponsors()
-    if sponsor not in sponsors:
-        sponsors.append(sponsor)
-        save_sponsors(sponsors)
-        await message.reply("✅ Homiy kanal qo'shildi.")
+
+    args = message.text.split()
+    if len(args) > 1:
+        sponsor = args[1]
+        add_sponsor(sponsor)
+        await message.reply(f"✅ Homiy kanal ({sponsor}) qo'shildi.")
     else:
-        await message.reply("🔁 Bu kanal ro'yxatda bor.")
+        await message.reply("➕ Qo'shiladigan homiy kanalning username'ini yuboring (masalan, @kanal_nomi):")
+        await state.set_state(SponsorState.adding)
+
+@dp.message(SponsorState.adding)
+async def add_sponsor_state_handler(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_ID:
+        return
+    
+    sponsor = message.text
+    add_sponsor(sponsor)
+    await state.clear()
+    await message.reply(f"✅ Homiy kanal ({sponsor}) qo'shildi.")
+
 
 @dp.message(Command("homiy_olib_tashla"))
-async def remove_sponsor(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
+async def remove_sponsor_command_handler(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_ID:
         return
-    
-    text = message.text.split()
-    if len(text) < 2:
-        await message.reply("❗ Foydalanish: /homiy_olib_tashla @kanal_username")
-        return
-    
-    sponsor = text[1]
-    sponsors = load_sponsors()
-    if sponsor in sponsors:
-        sponsors.remove(sponsor)
-        save_sponsors(sponsors)
-        await message.reply("🗑 Homiy kanal o'chirildi.")
+
+    args = message.text.split()
+    if len(args) > 1:
+        sponsor = args[1]
+        if remove_sponsor(sponsor):
+            await message.reply(f"🗑 Homiy kanal ({sponsor}) o'chirildi.")
+        else:
+            await message.reply(f"❌ Bunday kanal ({sponsor}) topilmadi.")
     else:
-        await message.reply("❌ Bunday kanal topilmadi.")
+        await message.reply("🗑 O'chiriladigan homiy kanalning username'ini yuboring (masalan, @kanal_nomi):")
+        await state.set_state(SponsorState.removing)
+
+@dp.message(SponsorState.removing)
+async def remove_sponsor_state_handler(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_ID:
+        return
+        
+    sponsor = message.text
+    if remove_sponsor(sponsor):
+        await message.reply(f"🗑 Homiy kanal ({sponsor}) o'chirildi.")
+    else:
+        await message.reply(f"❌ Bunday kanal ({sponsor}) topilmadi.")
+    await state.clear()
 
 @dp.message(Command("homiylar"))
 async def list_sponsors(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
+    if message.from_user.id not in ADMIN_ID:
         return
     
-    sponsors = load_sponsors()
+    sponsors = get_all_sponsors()
     if sponsors:
         await message.reply("📋 Homiylar ro'yxati:\n" + "\n".join(sponsors))
     else:
         await message.reply("🚫 Hech qanday homiy kanal yo'q.")
 
+@dp.message(Command("cancel"), StateFilter("*"))
+async def cancel_handler(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        return
+    await state.clear()
+    await message.reply("❌ Amal bekor qilindi.")
+
 @dp.message(Command("xabar_yubor"))
-async def broadcast(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
+async def broadcast_command_handler(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_ID:
         return
     
     text = message.text.replace("/xabar_yubor", "").strip()
     if not text:
-        await message.reply("✉️ Xabar yuborish uchun matn kiriting:\n/xabar_yubor Salom!")
+        await message.reply("✉️ Yuboriladigan xabar matnini kiriting:")
+        await state.set_state(BroadcastState.waiting_for_message)
         return
     
-    users = load_users()
+    users = get_all_users()
     sent = 0
     for uid in users:
         try:
@@ -239,8 +272,19 @@ async def broadcast(message: types.Message):
             continue
     await message.reply(f"📬 {sent} ta foydalanuvchiga xabar yuborildi.")
 
-async def main():
-    await dp.start_polling(bot)
+@dp.message(BroadcastState.waiting_for_message)
+async def broadcast_message_handler(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_ID:
+        return
 
-if __name__ == '__main__':
-    asyncio.run(main())
+    await state.clear()
+    text = message.text
+    users = get_all_users()
+    sent = 0
+    for uid in users:
+        try:
+            await bot.send_message(uid, text)
+            sent += 1
+        except:
+            continue
+    await message.reply(f"📬 {sent} ta foydalanuvchiga xabar yuborildi.")
